@@ -12,6 +12,7 @@
 #include <NZSL/Ast/ExpressionVisitorExcept.hpp>
 #include <NZSL/Ast/Module.hpp>
 #include <NZSL/Ast/StatementVisitorExcept.hpp>
+#include <NZSL/Ast/TransformerExecutor.hpp>
 #include <string>
 
 namespace nzsl
@@ -26,13 +27,15 @@ namespace nzsl
 			MslWriter(MslWriter&&) = delete;
 			~MslWriter() = default;
 
-			std::string Generate(const Ast::Module& module);
+			std::string Generate(Ast::Module& module, const BackendParameters& parameters = {});
 
 			void SetEnv(Environment environment);
 
 			struct Environment
 			{
 			};
+
+			static void RegisterPasses(Ast::TransformerExecutor& executor);
 
 		private:
 			struct PreVisitor;

@@ -13,6 +13,25 @@
 #include <NZSL/Lang/Constants.hpp>
 #include <NZSL/Lang/LangData.hpp>
 #include <NZSL/Lang/Version.hpp>
+#include <NZSL/Ast/Transformations/AliasTransformer.hpp>
+#include <NZSL/Ast/Transformations/BindingResolverTransformer.hpp>
+#include <NZSL/Ast/Transformations/BranchSplitterTransformer.hpp>
+#include <NZSL/Ast/Transformations/ConstantPropagationTransformer.hpp>
+#include <NZSL/Ast/Transformations/ConstantRemovalTransformer.hpp>
+#include <NZSL/Ast/Transformations/EliminateUnusedTransformer.hpp>
+#include <NZSL/Ast/Transformations/ForToWhileTransformer.hpp>
+#include <NZSL/Ast/Transformations/IdentifierTransformer.hpp>
+#include <NZSL/Ast/Transformations/LoopUnrollTransformer.hpp>
+#include <NZSL/Ast/Transformations/LiteralTransformer.hpp>
+#include <NZSL/Ast/Transformations/MatrixTransformer.hpp>
+#include <NZSL/Ast/Transformations/ResolveTransformer.hpp>
+#include <NZSL/Ast/Transformations/StructAssignmentTransformer.hpp>
+#include <NZSL/Ast/Transformations/SwizzleTransformer.hpp>
+#include <NZSL/Ast/Transformations/ValidationTransformer.hpp>
+#include <fmt/format.h>
+#include <frozen/unordered_map.h>
+#include <frozen/unordered_set.h>
+#include <tsl/ordered_set.h>
 #include <cassert>
 #include <optional>
 #include <sstream>
@@ -21,11 +40,34 @@
 
 namespace nzsl
 {
+	constexpr std::string_view s_mslNamespace = "metal::";
+
+	constexpr auto s_mslBuiltinMapping = frozen::make_unordered_map<Ast::BuiltinEntry, std::string_view>({
+		{ Ast::BuiltinEntry::BaseInstance,            { "base_instance" } },
+		{ Ast::BuiltinEntry::BaseVertex,              { "base_vertex" } },
+		{ Ast::BuiltinEntry::DrawIndex,               {} },
+		{ Ast::BuiltinEntry::FragCoord,               { "position" } },
+		{ Ast::BuiltinEntry::FragDepth,               { "depth(any)" } },
+		{ Ast::BuiltinEntry::GlocalInvocationIndices, { "thread_position_in_grid" } },
+		{ Ast::BuiltinEntry::InstanceIndex,           { "instance_id" } },
+		{ Ast::BuiltinEntry::LocalInvocationIndex,    { "thread_index_in_threadgroup" } },
+		{ Ast::BuiltinEntry::LocalInvocationIndices,  { "thread_position_in_threadgroup" } },
+		{ Ast::BuiltinEntry::VertexIndex,             { "vertex_id" } },
+		{ Ast::BuiltinEntry::VertexPosition,          { "position" } },
+		{ Ast::BuiltinEntry::WorkgroupCount,          { "threadgroups_per_grid" } },
+		{ Ast::BuiltinEntry::WorkgroupIndices,        { "threadgroup_position_in_grid" } },
+	});
+
 	struct MslWriter::PreVisitor : Ast::RecursiveVisitor
 	{
 		PreVisitor(MslWriter& writer) :
 		m_writer(writer)
 		{
+		}
+
+		void Visit(Ast::DeclareExternalStatement& node) override
+		{
+			externalStatements.push_back(node);
 		}
 
 		void Visit(Ast::DeclareFunctionStatement& node) override
@@ -36,6 +78,7 @@ namespace nzsl
 			// Speed up by not visiting function statements, we only need to extract function data
 		}
 
+		std::vector<Ast::DeclareExternalStatement> externalStatements;
 		MslWriter& m_writer;
 	};
 
@@ -195,7 +238,7 @@ namespace nzsl
 		std::unordered_map<std::size_t, Identifier> modules;
 		std::unordered_map<std::size_t, StructData> structs;
 		std::unordered_map<std::size_t, Identifier> variables;
-		std::vector<std::string> externalBlockNames;
+		std::vector<Ast::DeclareExternalStatement> externalStatements;
 		std::vector<std::string> moduleNames;
 		const Ast::Module* currentModule;
 		bool enforceNonDefaultTypes = false;
@@ -204,13 +247,56 @@ namespace nzsl
 		unsigned int indentLevel = 0;
 	};
 
-	std::string MslWriter::Generate(const Ast::Module& module)
+	std::string MslWriter::Generate(Ast::Module& module, const BackendParameters& parameters)
 	{
 		State state;
 		m_currentState = &state;
 		NAZARA_DEFER({ m_currentState = nullptr; });
 
+		if (parameters.backendPasses)
+		{
+			Ast::TransformerExecutor executor;
+			if (parameters.backendPasses.Test(BackendPass::Resolve))
+			{
+				executor.AddPass<Ast::ResolveTransformer>([&](Ast::ResolveTransformer::Options& opt)
+				{
+					opt.moduleResolver = parameters.shaderModuleResolver;
+				});
+			}
+
+			if (parameters.backendPasses.Test(BackendPass::TargetRequired))
+				RegisterPasses(executor);
+
+			if (parameters.backendPasses.Test(BackendPass::Optimize))
+				executor.AddPass<Ast::ConstantPropagationTransformer>();
+
+			if (parameters.backendPasses.Test(BackendPass::Validate))
+			{
+				executor.AddPass<Ast::ValidationTransformer>([](Ast::ValidationTransformer::Options& opt)
+				{
+					opt.allowUntyped = false;
+					opt.checkIndices = true;
+				});
+			}
+
+			Ast::TransformerContext context;
+			context.optionValues = parameters.optionValues;
+
+			executor.Transform(module, context);
+		}
+
+		if (parameters.backendPasses.Test(BackendPass::RemoveDeadCode))
+		{
+			Ast::DependencyCheckerVisitor::Config dependencyConfig;
+			dependencyConfig.usedShaderStages = ShaderStageType_All;
+
+			Ast::EliminateUnusedPass(module, dependencyConfig);
+		}
+
 		AppendHeader(module);
+		AppendLine("#include <metal_stdlib>");
+		AppendLine("#include <simd/simd.h>");
+		AppendLine();
 
 		// First registration pass (required to register function names)
 		PreVisitor previsitor(*this);
@@ -231,6 +317,7 @@ namespace nzsl
 
 			module.rootNode->Visit(previsitor);
 		}
+		m_currentState->externalStatements = std::move(previsitor.externalStatements);
 
 		// Register imported modules
 		m_currentState->currentModuleIndex = 0;
@@ -253,6 +340,92 @@ namespace nzsl
 		module.rootNode->Visit(*this);
 
 		return state.stream.str();
+	}
+
+	void MslWriter::RegisterPasses(Ast::TransformerExecutor& executor)
+	{
+		// Metal Shading Language is based on C++ 14/17 spec and so it uses C++ keywords (with some features being removed like exceptions)
+		static constexpr auto s_reservedKeywords = frozen::make_unordered_set<frozen::string>({
+			"alignas", "alignof", "and", "and_eq", "asm", "atomic_cancel", "atomic_commit", "atomic_noexcept", "auto", "bitand",
+			"bitor", "bool", "break", "case", "char", "char16_t", "char32_t", "class", "compl", "const", "constexpr", "const_cast",
+			"continue", "decltype", "default", "do", "double", "else", "enum", "explicit", "export", "extern", "false", "float", "for",
+			"friend", "if", "inline", "int", "long", "mutable", "namespace", "not", "not_eq", "nullptr", "operator", "or", "or_eq",
+			"private", "protected", "public", "reinterpret_cast", "return", "short", "signed", "sizeof", "static", "static_assert",
+			"static_cast", "struct", "switch", "template", "this", "true", "typedef", "typename", "union", "unsigned", "using", "void",
+			"volatile", "wchar_t", "while", "xor", "xor_eq", "device", "constant", "threadgroup", "threadgroup_imageblock", "object_data", "ray_data"
+		});
+
+		// We need two identifiers passes, the first one to rename reserved/forbidden variable names and the second one to ensure all variables name are uniques (which isn't guaranteed by the transformation passes)
+		// We can't do this at once at the end because transformations passes will introduce variables prefixed by _nzsl which is forbidden in user code
+		Ast::IdentifierTransformer::Options firstIdentifierPassOptions;
+		firstIdentifierPassOptions.makeVariableNameUnique = false;
+		firstIdentifierPassOptions.identifierSanitizer = [](std::string& identifier, Ast::IdentifierCategory /*scope*/)
+		{
+			using namespace std::string_view_literals;
+
+			bool nameChanged = false;
+
+			// Identifier can't start with _nzsl
+			if (identifier.compare(0, 5, "_nzsl") == 0)
+			{
+				identifier.replace(0, 5, "_"sv);
+				nameChanged = true;
+			}
+
+			// Identifier can't be named "main"
+			if (identifier == "main")
+			{
+				identifier = "main0"sv;
+				nameChanged = true;
+			}
+
+			return nameChanged;
+		};
+
+		Ast::IdentifierTransformer::Options secondIdentifierPassOptions;
+		secondIdentifierPassOptions.makeVariableNameUnique = true;
+		secondIdentifierPassOptions.identifierSanitizer = [](std::string& identifier, Ast::IdentifierCategory /*scope*/)
+		{
+			using namespace std::string_view_literals;
+
+			bool nameChanged = false;
+			while (s_reservedKeywords.count(frozen::string(identifier)) != 0)
+			{
+				identifier += '_';
+				nameChanged = true;
+			}
+
+			return nameChanged;
+		};
+
+		executor.AddPass<Ast::LoopUnrollTransformer>();
+		executor.AddPass<Ast::LiteralTransformer>();
+		//executor.AddPass<Ast::BranchSplitterTransformer>();
+		executor.AddPass<Ast::IdentifierTransformer>(firstIdentifierPassOptions);
+		executor.AddPass<Ast::ForToWhileTransformer>();
+		executor.AddPass<Ast::StructAssignmentTransformer>([](Ast::StructAssignmentTransformer::Options& opt)
+		{
+			opt.splitWrappedArrayAssignation = false;
+			opt.splitWrappedStructAssignation = true;
+		});
+		executor.AddPass<Ast::SwizzleTransformer>([](Ast::SwizzleTransformer::Options& opt)
+		{
+			opt.removeScalarSwizzling = true;
+			//opt.removeSwizzleAssigment = true;
+		});
+		executor.AddPass<Ast::MatrixTransformer>([](Ast::MatrixTransformer::Options& opt)
+		{
+			opt.removeMatrixBinaryAddSub = true;
+			opt.removeMatrixCast = true;
+		});
+		executor.AddPass<Ast::BindingResolverTransformer>();
+		executor.AddPass<Ast::ConstantRemovalTransformer>([](Ast::ConstantRemovalTransformer::Options& opt)
+		{
+			opt.removeConstArraySize = false;
+			opt.removeTypeConstant = false;
+		});
+		executor.AddPass<Ast::AliasTransformer>();
+		executor.AddPass<Ast::IdentifierTransformer>(secondIdentifierPassOptions);
 	}
 
 	void MslWriter::SetEnv(Environment environment)
@@ -310,7 +483,7 @@ namespace nzsl
 		throw std::runtime_error("unexpected ImplicitMatrixType");
 	}
 
-	void MslWriter::Append(const Ast::ImplicitVectorType& /*vecType*/)
+	void MslWriter::Append(const Ast::ImplicitVectorType& /*;vecType*/)
 	{
 		throw std::runtime_error("unexpected ImplicitVectorType");
 	}
@@ -322,20 +495,7 @@ namespace nzsl
 
 	void MslWriter::Append(const Ast::MatrixType& matrixType)
 	{
-		if (matrixType.columnCount == matrixType.rowCount)
-		{
-			Append("mat");
-			Append(matrixType.columnCount);
-		}
-		else
-		{
-			Append("mat");
-			Append(matrixType.columnCount);
-			Append("x");
-			Append(matrixType.rowCount);
-		}
-
-		Append("[", matrixType.type, "]");
+		Append(s_mslNamespace, matrixType.type, matrixType.columnCount, 'x', matrixType.rowCount);
 	}
 
 	void MslWriter::Append(const Ast::MethodType& /*functionType*/)
@@ -355,7 +515,7 @@ namespace nzsl
 
 	void MslWriter::Append(Ast::NoType)
 	{
-		return Append("()");
+		return Append("(void)");
 	}
 
 	void MslWriter::Append(Ast::PrimitiveType type)
@@ -363,13 +523,13 @@ namespace nzsl
 		switch (type)
 		{
 			case Ast::PrimitiveType::Boolean:      return Append("bool");
-			case Ast::PrimitiveType::Float32:      return Append("f32");
-			case Ast::PrimitiveType::Float64:      return Append("f64");
-			case Ast::PrimitiveType::Int32:        return Append("i32");
-			case Ast::PrimitiveType::UInt32:       return Append("u32");
-			case Ast::PrimitiveType::String:       return Append("string");
-			case Ast::PrimitiveType::FloatLiteral: return Append("FloatLiteral");
-			case Ast::PrimitiveType::IntLiteral:   return Append("IntLiteral");
+			case Ast::PrimitiveType::Float32:      return Append("float");
+			case Ast::PrimitiveType::Float64:      return Append("double");
+			case Ast::PrimitiveType::Int32:        return Append("int");
+			case Ast::PrimitiveType::UInt32:       return Append("uint");
+			case Ast::PrimitiveType::String:       return Append("const char*"); // May be invalid
+			case Ast::PrimitiveType::FloatLiteral: throw std::runtime_error("unexpected untyped float");
+			case Ast::PrimitiveType::IntLiteral:   throw std::runtime_error("unexpected untyped integer");
 		}
 	}
 
@@ -462,9 +622,7 @@ namespace nzsl
 
 	void MslWriter::Append(const Ast::VectorType& vecType)
 	{
-		Append("vec", vecType.componentCount);
-		if (vecType.type != Ast::PrimitiveType::FloatLiteral && vecType.type != Ast::PrimitiveType::IntLiteral)
-			Append("[", vecType.type, "]");
+		Append(s_mslNamespace, vecType.type, vecType.componentCount);
 	}
 
 	template<typename T>
@@ -499,14 +657,10 @@ namespace nzsl
 
 		bool first = true;
 
-		Append("[");
 		AppendAttributesInternal(first, std::forward<Args>(params)...);
-		Append("]");
 
 		if (appendLine)
 			AppendLine();
-		else
-			Append(" ");
 	}
 
 	template<typename T>
@@ -516,7 +670,7 @@ namespace nzsl
 			return;
 
 		if (!first)
-			Append(", ");
+			Append(" ");
 
 		first = false;
 
@@ -549,8 +703,7 @@ namespace nzsl
 	{
 		if (!attribute.HasValue())
 			return;
-
-		Append("author(", EscapeString(attribute.author), ")");
+		AppendComment("Author " + EscapeString(attribute.author));
 	}
 
 	void MslWriter::AppendAttribute(BindingAttribute attribute)
@@ -572,15 +725,11 @@ namespace nzsl
 	{
 		if (!attribute.HasValue())
 			return;
-
-		Append("builtin(");
-
-		if (attribute.builtin.IsResultingValue())
-			Append(Parser::ToString(attribute.builtin.GetResultingValue()));
-		else
-			attribute.builtin.GetExpression()->Visit(*this);
-
-		Append(")");
+		auto it = s_mslBuiltinMapping.find(attribute.builtin.GetResultingValue());
+		assert(it != s_mslBuiltinMapping.end());
+		if (it->second.empty())
+			throw std::runtime_error("unsupported builtin attribute!");
+		Append("[[", it->second, "]]");
 	}
 
 	void MslWriter::AppendAttribute(CondAttribute attribute)
@@ -617,8 +766,7 @@ namespace nzsl
 	{
 		if (!attribute.HasValue())
 			return;
-
-		Append("desc(", EscapeString(attribute.description), ")");
+		AppendComment("Description: " + EscapeString(attribute.description));
 	}
 
 	void MslWriter::AppendAttribute(EarlyFragmentTestsAttribute attribute)
@@ -641,14 +789,17 @@ namespace nzsl
 		if (!attribute.HasValue())
 			return;
 
-		Append("entry(");
-
 		if (attribute.stageType.IsResultingValue())
-			Append(Parser::ToString(attribute.stageType.GetResultingValue()));
+		{
+			switch (attribute.stageType.GetResultingValue())
+			{
+				case ShaderStageType::Compute: Append("kernel"); break;
+				case ShaderStageType::Fragment: Append("fragment"); break;
+				case ShaderStageType::Vertex: Append("vertex"); break;
+			}
+		}
 		else
 			attribute.stageType.GetExpression()->Visit(*this);
-
-		Append(")");
 	}
 
 	void MslWriter::AppendAttribute(FeatureAttribute attribute)
@@ -678,10 +829,9 @@ namespace nzsl
 		Append(")");
 	}
 
-	void MslWriter::AppendAttribute(LangVersionAttribute attribute)
+	void MslWriter::AppendAttribute(LangVersionAttribute /*attribute*/)
 	{
-		// nzsl_version
-		Append("nzsl_version(\"", Version::ToString(attribute.version), "\")");
+		// nothing to do
 	}
 
 	void MslWriter::AppendAttribute(LayoutAttribute attribute)
@@ -701,8 +851,7 @@ namespace nzsl
 	{
 		if (!attribute.HasValue())
 			return;
-
-		Append("license(", EscapeString(attribute.license), ")");
+		AppendComment("License: " + EscapeString(attribute.license));
 	}
 
 	void MslWriter::AppendAttribute(LocationAttribute attribute)
@@ -710,14 +859,14 @@ namespace nzsl
 		if (!attribute.HasValue())
 			return;
 
-		Append("location(");
+		Append("[[color(");
 
 		if (attribute.locationIndex.IsResultingValue())
 			Append(attribute.locationIndex.GetResultingValue());
 		else
 			attribute.locationIndex.GetExpression()->Visit(*this);
 
-		Append(")");
+		Append(")]]");
 	}
 
 	void MslWriter::AppendAttribute(SetAttribute attribute)
@@ -739,23 +888,12 @@ namespace nzsl
 	{
 		if (!attribute.HasValue())
 			return;
-
-		Append("tag(", EscapeString(attribute.tag), ")");
+		AppendComment("Tag: " + attribute.tag);
 	}
 
-	void MslWriter::AppendAttribute(UnrollAttribute attribute)
+	void MslWriter::AppendAttribute(UnrollAttribute /*attribute*/)
 	{
-		if (!attribute.HasValue())
-			return;
-
-		Append("unroll(");
-
-		if (attribute.unroll.IsResultingValue())
-			Append(Parser::ToString(attribute.unroll.GetResultingValue()));
-		else
-			attribute.unroll.GetExpression()->Visit(*this);
-
-		Append(")");
+		throw std::runtime_error("unexpected unroll attribute, is the shader sanitized?");
 	}
 
 	void MslWriter::AppendAttribute(WorkgroupAttribute attribute)
@@ -874,12 +1012,9 @@ namespace nzsl
 
 	void MslWriter::AppendHeader(const Ast::Module& module)
 	{
-		AppendModuleAttributes(*module.metadata);
 		if (!module.metadata->moduleName.empty() && module.metadata->moduleName[0] != '_')
-			AppendLine("module ", module.metadata->moduleName, ";");
-		else
-			AppendLine("module;");
-		AppendLine();
+			AppendComment("Module " + EscapeString(module.metadata->moduleName));
+		AppendModuleAttributes(*module.metadata);
 	}
 	void MslWriter::AppendModuleAttributes(const Ast::Module::Metadata& metadata)
 	{
@@ -1134,16 +1269,6 @@ namespace nzsl
 		{
 			if (i != 0)
 				Append(", ");
-
-			if (node.parameters[i].semantic == Ast::FunctionParameterSemantic::InOut)
-			{
-				Append("inout ");
-			}
-			else if (node.parameters[i].semantic == Ast::FunctionParameterSemantic::Out)
-			{
-				Append("out ");
-			}
-
 			node.parameters[i].expr->Visit(*this);
 		}
 		Append(")");
@@ -1151,8 +1276,8 @@ namespace nzsl
 
 	void MslWriter::Visit(Ast::CastExpression& node)
 	{
-		Append(node.targetType);
-		Append("(");
+		// TODO: manage different casts (static_cast / reinterpret_cast)
+		Append("static_cast<", node.targetType, ">(");
 
 		bool first = true;
 		for (const auto& exprPtr : node.expressions)
@@ -1168,15 +1293,9 @@ namespace nzsl
 		Append(")");
 	}
 
-	void MslWriter::Visit(Ast::ConditionalExpression& node)
+	void MslWriter::Visit(Ast::ConditionalExpression& /*node*/)
 	{
-		Append("const_select(");
-		node.condition->Visit(*this);
-		Append(", ");
-		node.truePath->Visit(*this);
-		Append(", ");
-		node.falsePath->Visit(*this);
-		Append(")");
+		throw std::runtime_error("unexpected conditional expression, is shader sanitized?");
 	}
 
 	void MslWriter::Visit(Ast::ConstantArrayValueExpression& node)
@@ -1511,44 +1630,9 @@ namespace nzsl
 		AppendLine(";");
 	}
 
-	void MslWriter::Visit(Ast::DeclareExternalStatement& node)
+	void MslWriter::Visit(Ast::DeclareExternalStatement& /*node*/)
 	{
-		AppendAttributes(true, SetAttribute{ node.bindingSet }, AutoBindingAttribute{ node.autoBinding }, TagAttribute{ node.tag });
-		Append("external");
-
-		if (!node.name.empty())
-		{
-			Append(" ", node.name);
-
-			m_currentState->currentExternalBlockIndex = m_currentState->externalBlockNames.size();
-			m_currentState->externalBlockNames.push_back(node.name);
-		}
-
-		AppendLine();
-
-		EnterScope();
-
-		bool first = true;
-		for (const auto& externalVar : node.externalVars)
-		{
-			if (!first)
-				AppendLine(",");
-
-			first = false;
-
-			if (externalVar.type.IsResultingValue() && IsPushConstantType(externalVar.type.GetResultingValue())) // push constants don't have set or binding'
-				AppendAttributes(false, TagAttribute{ externalVar.tag });
-			else
-				AppendAttributes(false, SetAttribute{ externalVar.bindingSet }, BindingAttribute{ externalVar.bindingIndex }, TagAttribute{ externalVar.tag });
-			Append(externalVar.name, ": ", externalVar.type);
-
-			if (externalVar.varIndex)
-				RegisterVariable(*externalVar.varIndex, externalVar.name);
-		}
-
-		LeaveScope();
-
-		m_currentState->currentExternalBlockIndex = {};
+		/* nothing to do */
 	}
 
 	void MslWriter::Visit(Ast::DeclareFunctionStatement& node)
@@ -1562,36 +1646,59 @@ namespace nzsl
 			DepthWriteAttribute{ node.depthWrite }
 		);
 
-		Append("fn ", node.name, "(");
-		for (std::size_t i = 0; i < node.parameters.size(); ++i)
+		if (node.returnType.HasValue() && (!node.returnType.IsResultingValue() || !IsNoType(node.returnType.GetResultingValue())))
+			Append(node.returnType);
+		else
+			Append("void");
+		AppendLine(" ", node.name, "(");
+		m_currentState->indentLevel++;
 		{
-			const auto& parameter = node.parameters[i];
-
-			if (i != 0)
-				Append(", ");
-
-			if (parameter.semantic == Ast::FunctionParameterSemantic::InOut)
+			std::size_t i = 0;
+			for (; i < node.parameters.size(); ++i)
 			{
-				Append("inout ");
+				const auto& parameter = node.parameters[i];
+
+				if (i != 0)
+					AppendLine(",");
+
+				Append(parameter.type, ' ', parameter.name);
+				if (i == 0 && node.entryStage.HasValue())
+				{
+					if (node.entryStage.GetResultingValue() == ShaderStageType::Fragment || node.entryStage.GetResultingValue() == ShaderStageType::Vertex)
+						Append(" [[stage_in]]");
+				}
+
+				if (parameter.varIndex)
+					RegisterVariable(*parameter.varIndex, parameter.name);
 			}
-			else if (parameter.semantic == Ast::FunctionParameterSemantic::Out)
+
+			// External variables need to be declared as entry point parameters
+			if (node.entryStage.HasValue())
 			{
-				Append("out ");
+				for (const auto& statement : m_currentState->externalStatements)
+				{
+					for (const auto& externalVar : statement.externalVars)
+					{
+						if (i != 0)
+							AppendLine(",");
+
+						const Ast::ExpressionType& exprType = externalVar.type.GetResultingValue();
+
+						if (IsUniformType(exprType))
+							Append("constant ", externalVar.type, '&');
+						else if (IsStorageType(exprType))
+							Append("device ", externalVar.type, '*');
+						Append(' ', externalVar.name, ' ');
+
+						if (externalVar.varIndex)
+							RegisterVariable(*externalVar.varIndex, externalVar.name);
+					}
+				}
 			}
-
-			Append(parameter.name);
-			Append(": ");
-			Append(parameter.type);
-
-			if (parameter.varIndex)
-				RegisterVariable(*parameter.varIndex, parameter.name);
 		}
+		m_currentState->indentLevel--;
+		AppendLine();
 		Append(")");
-		if (node.returnType.HasValue())
-		{
-			if (!node.returnType.IsResultingValue() || !IsNoType(node.returnType.GetResultingValue()))
-				Append(" -> ", node.returnType);
-		}
 
 		AppendLine();
 		EnterScope();
@@ -1601,22 +1708,9 @@ namespace nzsl
 		LeaveScope();
 	}
 
-	void MslWriter::Visit(Ast::DeclareOptionStatement& node)
+	void MslWriter::Visit(Ast::DeclareOptionStatement& /*node*/)
 	{
-		if (node.optIndex)
-			RegisterConstant(*node.optIndex, node.optName);
-
-		Append("option ", node.optName);
-		if (node.optType.HasValue())
-			Append(": ", node.optType);
-
-		if (node.defaultValue)
-		{
-			Append(" = ");
-			node.defaultValue->Visit(*this);
-		}
-
-		Append(";");
+		throw std::runtime_error("unexpected option declaration, is shader sanitized?");
 	}
 
 	void MslWriter::Visit(Ast::DeclareStructStatement& node)
@@ -1629,19 +1723,20 @@ namespace nzsl
 		AppendLine(node.description.name);
 		EnterScope();
 		{
-			bool first = true;
 			for (const auto& member : node.description.members)
 			{
-				if (!first)
-					AppendLine(",");
-
-				first = false;
-
-				AppendAttributes(false, CondAttribute{ member.cond }, LocationAttribute{ member.locationIndex }, InterpAttribute{ member.interp }, BuiltinAttribute{ member.builtin }, TagAttribute{ member.tag });
-				Append(member.name, ": ", member.type);
+				AppendAttributes(false, TagAttribute{ member.tag });
+				Append(member.type, ' ', member.name);
+				if (member.locationIndex.HasValue() || member.builtin.HasValue())
+				{
+					Append(' ');
+					AppendAttributes(false, LocationAttribute{ member.locationIndex }, BuiltinAttribute{ member.builtin });
+				}
+				AppendLine(';');
 			}
 		}
-		LeaveScope();
+		LeaveScope(false);
+		AppendLine(';');
 	}
 
 	void MslWriter::Visit(Ast::DeclareVariableStatement& node)
@@ -1649,9 +1744,12 @@ namespace nzsl
 		if (node.varIndex)
 			RegisterVariable(*node.varIndex, node.varName);
 
-		Append("let ", node.varName);
 		if (node.varType.HasValue() && (!node.varType.IsResultingValue() || !IsLiteralType(node.varType.GetResultingValue())))
-			Append(": ", node.varType);
+			Append(node.varType);
+		else
+			Append("void"); // FIXuME
+
+		Append(' ', node.varName);
 
 		if (node.initialExpression)
 		{
@@ -1673,84 +1771,19 @@ namespace nzsl
 		Append(";");
 	}
 
-	void MslWriter::Visit(Ast::ForStatement& node)
+	void MslWriter::Visit(Ast::ForStatement& /*node*/)
 	{
-		if (node.varIndex)
-			RegisterVariable(*node.varIndex, node.varName);
-
-		AppendAttributes(true, UnrollAttribute{ node.unroll });
-		Append("for ", node.varName, " in ");
-		node.fromExpr->Visit(*this);
-		Append(" -> ");
-		node.toExpr->Visit(*this);
-
-		if (node.stepExpr)
-		{
-			Append(" : ");
-			node.stepExpr->Visit(*this);
-		}
-
-		AppendLine();
-
-		ScopeVisit(*node.statement);
+		throw std::runtime_error("unexpected for statement, is the shader sanitized?");
 	}
 
-	void MslWriter::Visit(Ast::ForEachStatement& node)
+	void MslWriter::Visit(Ast::ForEachStatement& /*node*/)
 	{
-		if (node.varIndex)
-			RegisterVariable(*node.varIndex, node.varName);
-
-		AppendAttributes(true, UnrollAttribute{ node.unroll });
-		Append("for ", node.varName, " in ");
-		node.expression->Visit(*this);
-		AppendLine();
-
-		ScopeVisit(*node.statement);
+		throw std::runtime_error("unexpected for each statement, is the shader sanitized?");
 	}
 
-	void MslWriter::Visit(Ast::ImportStatement& node)
+	void MslWriter::Visit(Ast::ImportStatement& /*node*/)
 	{
-		Append("import ");
-
-		if (node.identifiers.empty())
-		{
-			// Whole module import
-			Append(node.moduleName);
-
-			std::string_view defaultIdentifierName;
-			std::size_t lastSep = node.moduleName.find_last_of('.');
-			if (lastSep != std::string::npos)
-				defaultIdentifierName = std::string_view(node.moduleName).substr(lastSep + 1);
-			else
-				defaultIdentifierName = node.moduleName;
-
-			if (node.moduleIdentifier != node.moduleName)
-				Append(" as ", node.moduleIdentifier);
-
-			AppendLine(";");
-		}
-		else
-		{
-			// Module identifier import
-			bool first = true;
-			for (const auto& entry : node.identifiers)
-			{
-				if (!first)
-					Append(", ");
-
-				first = false;
-
-				if (!entry.identifier.empty())
-				{
-					Append(entry.identifier);
-					if (!entry.renamedIdentifier.empty())
-						Append(" as ", entry.renamedIdentifier);
-				}
-				else
-					Append("*");
-			}
-			AppendLine(" from ", node.moduleName, ";");
-		}
+		throw std::runtime_error("unexpected import statement, is the shader sanitized?");
 	}
 
 	void MslWriter::Visit(Ast::MultiStatement& node)
