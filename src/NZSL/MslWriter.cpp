@@ -78,7 +78,7 @@ namespace nzsl
 			// Speed up by not visiting function statements, we only need to extract function data
 		}
 
-		std::vector<Ast::DeclareExternalStatement> externalStatements;
+		std::vector<std::reference_wrapper<Ast::DeclareExternalStatement>> externalStatements;
 		MslWriter& m_writer;
 	};
 
@@ -238,7 +238,7 @@ namespace nzsl
 		std::unordered_map<std::size_t, Identifier> modules;
 		std::unordered_map<std::size_t, StructData> structs;
 		std::unordered_map<std::size_t, Identifier> variables;
-		std::vector<Ast::DeclareExternalStatement> externalStatements;
+		std::vector<std::reference_wrapper<Ast::DeclareExternalStatement>> externalStatements;
 		std::vector<std::string> moduleNames;
 		const Ast::Module* currentModule;
 		bool enforceNonDefaultTypes = false;
@@ -508,9 +508,9 @@ namespace nzsl
 		AppendIdentifier(m_currentState->modules, moduleType.moduleIndex);
 	}
 
-	void MslWriter::Append(const Ast::NamedExternalBlockType& namedExternalBlockType)
+	void MslWriter::Append(const Ast::NamedExternalBlockType& /*namedExternalBlockType*/)
 	{
-		Append(m_currentState->externalBlockNames[namedExternalBlockType.namedExternalBlockIndex]);
+		// Nothing to do
 	}
 
 	void MslWriter::Append(Ast::NoType)
@@ -540,34 +540,28 @@ namespace nzsl
 
 	void MslWriter::Append(const Ast::SamplerType& samplerType)
 	{
+		Append(s_mslNamespace);
 		if (samplerType.depth)
-			Append("depth_");
-
-		Append("sampler");
+			Append("depth");
+		else
+			Append("texture");
 
 		switch (samplerType.dim)
 		{
-			case ImageType::E1D:       Append("1D");      break;
-			case ImageType::E1D_Array: Append("1D_array"); break;
-			case ImageType::E2D:       Append("2D");      break;
-			case ImageType::E2D_Array: Append("2D_array"); break;
-			case ImageType::E3D:       Append("3D");      break;
-			case ImageType::Cubemap:   Append("_cube");    break;
+			case ImageType::E1D:       Append("1d");      break;
+			case ImageType::E1D_Array: Append("1d_array"); break;
+			case ImageType::E2D:       Append("2d");      break;
+			case ImageType::E2D_Array: Append("2d_array"); break;
+			case ImageType::E3D:       Append("3d");      break;
+			case ImageType::Cubemap:   Append("cube");    break;
 		}
 
-		Append("[", samplerType.sampledType, "]");
+		Append('<', samplerType.sampledType, '>');
 	}
 
 	void MslWriter::Append(const Ast::StorageType& storageType)
 	{
-		Append("storage[", storageType.containedType);
-		switch (storageType.accessPolicy)
-		{
-			case AccessPolicy::ReadOnly:  Append(", readonly"); break;
-			case AccessPolicy::ReadWrite: break;
-			case AccessPolicy::WriteOnly: Append(", writeonly"); break;
-		}
-		Append("]");
+		Append(storageType.containedType);
 	}
 
 	void MslWriter::Append(const Ast::StructType& structType)
@@ -617,7 +611,7 @@ namespace nzsl
 
 	void MslWriter::Append(const Ast::UniformType& uniformType)
 	{
-		Append("uniform[", uniformType.containedType, "]");
+		Append(uniformType.containedType);
 	}
 
 	void MslWriter::Append(const Ast::VectorType& vecType)
@@ -967,10 +961,6 @@ namespace nzsl
 		const auto& identifier = Nz::Retrieve(map, id);
 		if (identifier.moduleIndex != m_currentState->currentModuleIndex)
 			Append(m_currentState->moduleNames[identifier.moduleIndex], '.');
-
-		if (identifier.externalBlockIndex && identifier.externalBlockIndex != m_currentState->currentExternalBlockIndex)
-			Append(m_currentState->externalBlockNames[*identifier.externalBlockIndex], '.');
-
 		Append(identifier.name);
 	}
 
@@ -1277,7 +1267,7 @@ namespace nzsl
 	void MslWriter::Visit(Ast::CastExpression& node)
 	{
 		// TODO: manage different casts (static_cast / reinterpret_cast)
-		Append("static_cast<", node.targetType, ">(");
+		Append(node.targetType, '(');
 
 		bool first = true;
 		for (const auto& exprPtr : node.expressions)
@@ -1355,7 +1345,6 @@ namespace nzsl
 				break;
 
 			case Ast::IdentifierType::ExternalBlock:
-				Append(m_currentState->externalBlockNames[node.identifierIndex]);
 				break;
 
 			case Ast::IdentifierType::Function:
@@ -1379,6 +1368,7 @@ namespace nzsl
 	void MslWriter::Visit(Ast::IntrinsicExpression& node)
 	{
 		bool method = false;
+		bool firstParam = true;
 		switch (node.intrinsic)
 		{
 			// Function intrinsics
@@ -1459,8 +1449,11 @@ namespace nzsl
 			case Ast::IntrinsicType::TextureSampleImplicitLod:
 				assert(!node.parameters.empty());
 				Visit(node.parameters.front(), true);
-				Append(".Sample");
+				Append(".sample(");
+				Visit(node.parameters.front(), true);
+				Append("Sampler, ");
 				method = true;
+				firstParam = false;
 				break;
 
 			case Ast::IntrinsicType::TextureSampleImplicitLodDepthComp:
@@ -1482,7 +1475,8 @@ namespace nzsl
 		bool prevShouldEnforceTypes = m_currentState->enforceNonDefaultTypes;
 		m_currentState->enforceNonDefaultTypes = true;
 
-		Append("(");
+		if (firstParam)
+			Append("(");
 		bool first = true;
 		for (std::size_t i = (method) ? 1 : 0; i < node.parameters.size(); ++i)
 		{
@@ -1677,18 +1671,30 @@ namespace nzsl
 			{
 				for (const auto& statement : m_currentState->externalStatements)
 				{
-					for (const auto& externalVar : statement.externalVars)
+					for (const auto& externalVar : statement.get().externalVars)
 					{
 						if (i != 0)
-							AppendLine(",");
+							AppendLine(',');
 
 						const Ast::ExpressionType& exprType = externalVar.type.GetResultingValue();
 
 						if (IsUniformType(exprType))
-							Append("constant ", externalVar.type, '&');
+							Append("constant ", externalVar.type, "& ");
 						else if (IsStorageType(exprType))
-							Append("device ", externalVar.type, '*');
-						Append(' ', externalVar.name, ' ');
+							Append("device ", externalVar.type, "* ");
+						else
+							Append(externalVar.type, ' ');
+						Append(externalVar.name, ' ');
+						if (IsUniformType(exprType) || IsStorageType(exprType))
+							Append("[[buffer(", (externalVar.bindingSet.GetResultingValue() + 1) * externalVar.bindingIndex.GetResultingValue(), ")]]");
+						else if (IsSamplerType(exprType))
+							Append("[[texture(", (externalVar.bindingSet.GetResultingValue() + 1) * externalVar.bindingIndex.GetResultingValue(), ")]]");
+
+						if (IsSamplerType(exprType))
+						{
+							AppendLine(',');
+							Append(s_mslNamespace, "sampler ", externalVar.name, "Sampler [[sampler(", (externalVar.bindingSet.GetResultingValue() + 1) * externalVar.bindingIndex.GetResultingValue(), ")]]");
+						}
 
 						if (externalVar.varIndex)
 							RegisterVariable(*externalVar.varIndex, externalVar.name);

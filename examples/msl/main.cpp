@@ -1,6 +1,7 @@
 #include <NZSL/MslWriter.hpp>
 #include <NZSL/Parser.hpp>
 #include <iostream>
+#include <fstream>
 
 int main()
 {
@@ -8,5 +9,7 @@ int main()
 	nzsl::MslWriter mslWriter;
 	auto mslShader = mslWriter.Generate(*shader);
 	std::cout << mslShader << std::endl;
+	std::ofstream file("/tmp/test/output.metal");
+	file << mslShader << std::endl;
 	return 0;
 }
