@@ -1,6 +1,7 @@
 #include <Tests/ShaderUtils.hpp>
 #include <NZSL/GlslWriter.hpp>
 #include <NZSL/LangWriter.hpp>
+#include <NZSL/MslWriter.hpp>
 #include <NZSL/Parser.hpp>
 #include <NZSL/SpirV/SpirvPrinter.hpp>
 #include <NZSL/SpirvWriter.hpp>
@@ -8,12 +9,14 @@
 #include <NZSL/Ast/Compare.hpp>
 #include <NZSL/Ast/ReflectVisitor.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <filesystem>
 #include <glslang/Public/ShaderLang.h>
 #include <spirv-tools/libspirv.hpp>
 #include <NZSL/Ast/Transformations/BindingResolverTransformer.hpp>
 #include <NZSL/Ast/Transformations/LiteralTransformer.hpp>
 #include <NZSL/Ast/Cloner.hpp>
-#include <sstream>
+#include <process.hpp>
+#include <fstream>
 
 namespace NAZARA_ANONYMOUS_NAMESPACE
 {
@@ -345,6 +348,66 @@ void ExpectGLSL(nzsl::Ast::Module& shaderModule, std::string_view expectedOutput
 	}
 
 	ExpectGLSL(entryShaderStage.value(), shaderModule, expectedOutput, options, env, testShaderCompilation);
+}
+
+void ExpectMSL(const nzsl::Ast::Module& shader, std::string_view expectedOutput, const nzsl::BackendParameters& options)
+{
+	NAZARA_USE_ANONYMOUS_NAMESPACE
+
+	// Clone to avoid cross-test changes
+	nzsl::Ast::ModulePtr moduleClone = nzsl::Ast::Clone(shader);
+
+	std::string source = SanitizeSource(expectedOutput);
+
+	SECTION("Generating MSL")
+	{
+		nzsl::Ast::ModulePtr sanitizedModule;
+		WHEN("Sanitizing a second time")
+		{
+			nzsl::Ast::TransformerContext context;
+			nzsl::Ast::ResolveTransformer resolver;
+			REQUIRE_NOTHROW(resolver.Transform(*moduleClone, context));
+		}
+		nzsl::Ast::Module& targetModule = (sanitizedModule) ? *sanitizedModule : *moduleClone;
+
+		nzsl::MslWriter writer;
+		std::string output = writer.Generate(targetModule, options);
+
+		SECTION("Validating expected code")
+		{
+			std::string outputCode = SanitizeSource(output);
+			if (outputCode.find(source) == std::string::npos)
+				HandleSourceError("MSL", source, outputCode);
+		}
+
+		SECTION("Validating full MSL code (using MetalDevelopperTools or XCode)")
+		{
+			assert(std::filesystem::exists(std::filesystem::temp_directory_path()));
+			std::filesystem::path tmpPath = std::filesystem::temp_directory_path() / "NzslUnitTests";
+			if (!std::filesystem::exists(tmpPath))
+				std::filesystem::create_directory(tmpPath);
+
+			auto JenkinsOneAtATimeHash = [](std::string_view key) -> std::uint32_t
+			{
+				std::size_t i = 0;
+				std::uint32_t hash = 0;
+				while (i != key.length())
+				{
+					hash += key[i++];
+					hash += hash << 10;
+					hash ^= hash >> 6;
+				}
+				hash += hash << 3;
+				hash ^= hash >> 11;
+				hash += hash << 15;
+				return hash;
+			};
+
+			std::filesystem::path filePath = (tmpPath / std::to_string(JenkinsOneAtATimeHash(output))).replace_extension(".metal");
+			std::ofstream file(filePath);
+			file << output << std::endl;
+		}
+	}
 }
 
 void ExpectNZSL(const nzsl::Ast::Module& shaderModule, std::string_view expectedOutput)

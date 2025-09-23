@@ -32,6 +32,7 @@ struct ResolveOptions
 
 void ExpectGLSL(nzsl::ShaderStageType stageType, nzsl::Ast::Module& shader, std::string_view expectedOutput, const nzsl::BackendParameters& options = {}, const nzsl::GlslWriter::Environment& env = {}, bool testShaderCompilation = true);
 void ExpectGLSL(nzsl::Ast::Module& shader, std::string_view expectedOutput, const nzsl::BackendParameters& options = {}, const nzsl::GlslWriter::Environment& env = {}, bool testShaderCompilation = true);
+void ExpectMSL(const nzsl::Ast::Module& shader, std::string_view expectedOutput, const nzsl::BackendParameters& options = {});
 void ExpectNZSL(const nzsl::Ast::Module& shader, std::string_view expectedOutput);
 void ExpectSPIRV(nzsl::Ast::Module& shader, std::string_view expectedOutput, const nzsl::BackendParameters& options = {}, const nzsl::SpirvWriter::Environment& env = {}, bool outputParameter = false, const spvtools::ValidatorOptions& validatorOptions = {});
 

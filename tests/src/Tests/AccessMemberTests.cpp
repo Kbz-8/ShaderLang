@@ -86,6 +86,14 @@ void main()
 }
 )");
 
+			ExpectMSL(*shaderModule, R"(
+[entry(vert)]
+fn main()
+{
+	let result: f32 = ubo.s.field.z;
+}
+)");
+
 			ExpectNZSL(*shaderModule, R"(
 [entry(vert)]
 fn main()
