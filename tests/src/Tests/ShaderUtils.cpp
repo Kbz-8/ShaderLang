@@ -1,4 +1,5 @@
 #include <Tests/ShaderUtils.hpp>
+#include <Tests/ToolUtils.hpp>
 #include <NZSL/GlslWriter.hpp>
 #include <NZSL/LangWriter.hpp>
 #include <NZSL/MslWriter.hpp>
@@ -15,6 +16,7 @@
 #include <NZSL/Ast/Transformations/BindingResolverTransformer.hpp>
 #include <NZSL/Ast/Transformations/LiteralTransformer.hpp>
 #include <NZSL/Ast/Cloner.hpp>
+#include <fmt/format.h>
 #include <process.hpp>
 #include <fstream>
 
@@ -387,6 +389,7 @@ void ExpectMSL(const nzsl::Ast::Module& shader, std::string_view expectedOutput,
 			if (!std::filesystem::exists(tmpPath))
 				std::filesystem::create_directory(tmpPath);
 
+			// Util to generate unique filename
 			auto JenkinsOneAtATimeHash = [](std::string_view key) -> std::uint32_t
 			{
 				std::size_t i = 0;
@@ -403,9 +406,12 @@ void ExpectMSL(const nzsl::Ast::Module& shader, std::string_view expectedOutput,
 				return hash;
 			};
 
-			std::filesystem::path filePath = (tmpPath / std::to_string(JenkinsOneAtATimeHash(output))).replace_extension(".metal");
-			std::ofstream file(filePath);
-			file << output << std::endl;
+			std::filesystem::path filePath = (tmpPath / fmt::format("{}.metal", JenkinsOneAtATimeHash(output)));
+			{
+				std::ofstream file(filePath);
+				file << output << std::endl;
+			}
+			std::filesystem::remove(std::move(filePath));
 		}
 	}
 }

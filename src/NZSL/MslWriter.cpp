@@ -1700,7 +1700,11 @@ namespace nzsl
 				RegisterVariable(*parameter.varIndex, parameter.name);
 		}
 		if (m_currentState->hasExternalStructDeclared)
-			AppendLine(", ", s_mslExternalStructName, " externals)");
+		{
+			if (i != 0)
+				Append(", ");
+			AppendLine(s_mslExternalStructName, " externals)");
+		}
 		EnterScope();
 		{
 			AppendStatementList(node.statements);

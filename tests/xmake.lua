@@ -19,25 +19,18 @@ if has_config("tests") then
 		add_files("src/**.cpp")
 
 		add_deps("nzsl")
-		add_packages("catch2", "glslang", "spirv-tools")
+		add_packages("catch2", "glslang", "spirv-tools", "fmt", "tiny-process-library")
 
 		if has_config("with_nzslc") then
 			add_deps("nzslc", { links = {} })
-			add_packages("fmt", "tiny-process-library")
 		else
 			remove_files("src/Tests/NzslcTests.cpp")
 		end
 
 		if has_config("with_nzsla") then
 			add_deps("nzsla", { links = {} })
-			add_packages("fmt", "tiny-process-library")
 		else
 			remove_files("src/Tests/NzslaTests.cpp")
-		end
-
-		if not has_config("with_nzsla", "with_nzslc") then
-			remove_headerfiles("src/Tests/ToolTests.hpp")
-			remove_files("src/Tests/ToolTests.cpp")
 		end
 	end)
 end
