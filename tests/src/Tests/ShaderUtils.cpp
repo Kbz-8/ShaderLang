@@ -384,6 +384,13 @@ void ExpectMSL(const nzsl::Ast::Module& shader, std::string_view expectedOutput,
 
 		SECTION("Validating full MSL code (using MetalDevelopperTools or XCode)")
 		{
+			/**
+			 * There is no library to validate MSL code. We need to use Apple compiler tools.
+			 * To do so we output the generated code to a temporary unique file and ask
+			 * XCode's SDK under Apple platforms or MetalDevelopperTools under Windows/Linux(wine)
+			 * to compile it then we catch error outputs to check compilation state.
+			 */
+
 			assert(std::filesystem::exists(std::filesystem::temp_directory_path()));
 			std::filesystem::path tmpPath = std::filesystem::temp_directory_path() / "NzslUnitTests";
 			if (!std::filesystem::exists(tmpPath))
@@ -392,11 +399,10 @@ void ExpectMSL(const nzsl::Ast::Module& shader, std::string_view expectedOutput,
 			// Util to generate unique filename
 			auto JenkinsOneAtATimeHash = [](std::string_view key) -> std::uint32_t
 			{
-				std::size_t i = 0;
 				std::uint32_t hash = 0;
-				while (i != key.length())
+				for (auto c : key)
 				{
-					hash += key[i++];
+					hash += c;
 					hash += hash << 10;
 					hash ^= hash >> 6;
 				}
@@ -411,6 +417,24 @@ void ExpectMSL(const nzsl::Ast::Module& shader, std::string_view expectedOutput,
 				std::ofstream file(filePath);
 				file << output << std::endl;
 			}
+			#if defined(NAZARA_PLATFORM_MACOS) || defined(NAZARA_PLATFORM_IOS)
+				#ifdef NAZARA_PLATFORM_IOS
+					constexpr const std::string_view plat = "iphoneos";
+				#else
+					constexpr const std::string_view plat = "macosx";
+				#endif
+				ExecuteCommand(fmt::format("xcrun --sdk {} metal -x metal {} '-Werror' '-Wno-unused-variable' -o /dev/null", plat, filePath.string()), {}, {}, output);
+			#else
+				#ifdef NAZARA_PLATFORM_WINDOWS
+					constexpr const bool isWindows = true;
+				#else
+					constexpr const bool isWindows = false;
+				#endif
+				if (isWindows)
+					ExecuteCommand(fmt::format("metal.exe -x metal {} '-Werror' '-Wno-unused-variable' -o NUL", filePath.string()), {}, {}, output);
+				else
+					ExecuteCommand(fmt::format("WINEDEBUG=-all metal.exe -x metal Z:{} '-Werror' '-Wno-unused-variable' -o /dev/null", filePath.string()), {}, {}, output);
+			#endif
 			std::filesystem::remove(std::move(filePath));
 		}
 	}

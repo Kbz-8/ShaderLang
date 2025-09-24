@@ -97,7 +97,7 @@ void CheckHeaderMatch(const std::filesystem::path& originalFilepath)
 	CHECK(headerFile.eof());
 }
 
-void ExecuteCommand(const std::string& command, const std::string& pattern, std::string expectedOutput)
+void ExecuteCommand(const std::string& command, const std::string& pattern, std::string expectedOutput, const std::string& outputOnFailure)
 {
 	NAZARA_USE_ANONYMOUS_NAMESPACE
 
@@ -117,7 +117,7 @@ void ExecuteCommand(const std::string& command, const std::string& pattern, std:
 	int exitCode = compiler.get_exit_status();
 	if (exitCode != 0)
 	{
-		INFO("Command-line: " << command << "\nstdout: " << output << "\nstderr: " << errOutput);
+		INFO(outputOnFailure << "\nCommand-line: " << command << "\nstdout: " << output << "\nstderr: " << errOutput);
 		REQUIRE(exitCode == 0);
 	}
 

@@ -8,6 +8,6 @@
 
 void CheckFileMatch(const std::filesystem::path& firstFile, const std::filesystem::path& secondFile);
 void CheckHeaderMatch(const std::filesystem::path& originalFilepath);
-void ExecuteCommand(const std::string& command, const std::string& pattern = {}, std::string expectedOutput = {});
+void ExecuteCommand(const std::string& command, const std::string& pattern = {}, std::string expectedOutput = {}, const std::string& outputOnFailure = {});
 
 #endif
