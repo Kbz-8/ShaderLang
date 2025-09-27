@@ -90,6 +90,43 @@ void main()
 }
 )");
 
+		ExpectMSL(*shaderModule, R"(
+fragment
+void main0(
+
+)
+{
+	int x = 5;
+	int y = 2;
+	int r = x + y;
+	int r_2 = x - y;
+	int r_3 = x * y;
+	int r_4 = x / y;
+	int r_5 = x % y;
+	float x_2 = 5.0;
+	float y_2 = 2.0;
+	float r_6 = x_2 + y_2;
+	float r_7 = x_2 - y_2;
+	float r_8 = x_2 * y_2;
+	float r_9 = x_2 / y_2;
+	float r_10 = metal::fmod(x_2, y_2);
+	metal::int2 x_3 = metal::int2(5, 7);
+	metal::int2 y_3 = metal::int2(2, 3);
+	metal::int2 r_11 = x_3 + y_3;
+	metal::int2 r_12 = x_3 - y_3;
+	metal::int2 r_13 = x_3 * y_3;
+	metal::int2 r_14 = x_3 / y_3;
+	metal::int2 r_15 = x_3 % y_3;
+	metal::float2 x_4 = metal::float2(5.0, 7.0);
+	metal::float2 y_4 = metal::float2(2.0, 3.0);
+	metal::float2 r_16 = x_4 + y_4;
+	metal::float2 r_17 = x_4 - y_4;
+	metal::float2 r_18 = x_4 * y_4;
+	metal::float2 r_19 = x_4 / y_4;
+	metal::float2 r_20 = metal::fmod(x_4, y_4);
+}
+)");
+
 		ExpectNZSL(*shaderModule, R"(
 [entry(frag)]
 fn main()
@@ -355,6 +392,43 @@ void main()
 }
 )");
 
+		ExpectMSL(*shaderModule, R"(
+fragment
+void main0(
+
+)
+{
+	int x = 5;
+	int y = 2;
+	int r = x & y;
+	int r_2 = x | y;
+	int r_3 = x ^ y;
+	int r_4 = x << y;
+	int r_5 = x >> y;
+	uint x_2 = 5;
+	uint y_2 = 2;
+	uint r_6 = x_2 & y_2;
+	uint r_7 = x_2 | y_2;
+	uint r_8 = x_2 ^ y_2;
+	uint r_9 = x_2 << y_2;
+	uint r_10 = x_2 >> y_2;
+	metal::int3 x_3 = metal::int3(0, 1, 2);
+	metal::int3 y_3 = metal::int3(2, 1, 0);
+	metal::int3 r_11 = x_3 & y_3;
+	metal::int3 r_12 = x_3 | y_3;
+	metal::int3 r_13 = x_3 ^ y_3;
+	metal::int3 r_14 = x_3 << y_3;
+	metal::int3 r_15 = x_3 >> y_3;
+	metal::uint3 x_4 = metal::uint3(0, 1, 2);
+	metal::uint3 y_4 = metal::uint3(2, 1, 0);
+	metal::uint3 r_16 = x_4 & y_4;
+	metal::uint3 r_17 = x_4 | y_4;
+	metal::uint3 r_18 = x_4 ^ y_4;
+	metal::uint3 r_19 = x_4 << y_4;
+	metal::uint3 r_20 = x_4 >> y_4;
+}
+)");
+
 		ExpectNZSL(*shaderModule, R"(
 [entry(frag)]
 fn main()
@@ -568,6 +642,41 @@ void main()
 	mat3 r = x + y;
 	mat3 r_2 = x - y;
 	mat3 r_3 = x * y;
+	x += y;
+	x -= y;
+	x *= y;
+}
+)");
+
+		ExpectMSL(*shaderModule, R"(
+fragment
+void main0(
+
+)
+{
+	metal::float3x3 _nzsl_matrix;
+	float _nzsl_cachedResult = 0.0;
+	_nzsl_matrix[0] = metal::float3(_nzsl_cachedResult, 0.0, 0.0);
+	_nzsl_matrix[1] = metal::float3(0.0, _nzsl_cachedResult, 0.0);
+	_nzsl_matrix[2] = metal::float3(0.0, 0.0, _nzsl_cachedResult);
+	metal::float3x3 x = _nzsl_matrix;
+	metal::float3x3 _nzsl_matrix_2;
+	float _nzsl_cachedResult_2 = 1.0;
+	_nzsl_matrix_2[0] = metal::float3(_nzsl_cachedResult_2, 0.0, 0.0);
+	_nzsl_matrix_2[1] = metal::float3(0.0, _nzsl_cachedResult_2, 0.0);
+	_nzsl_matrix_2[2] = metal::float3(0.0, 0.0, _nzsl_cachedResult_2);
+	metal::float3x3 y = _nzsl_matrix_2;
+	metal::float3x3 _nzsl_matrix_3;
+	_nzsl_matrix_3[0] = x[0] + y[0];
+	_nzsl_matrix_3[1] = x[1] + y[1];
+	_nzsl_matrix_3[2] = x[2] + y[2];
+	metal::float3x3 r = _nzsl_matrix_3;
+	metal::float3x3 _nzsl_matrix_4;
+	_nzsl_matrix_4[0] = x[0] - y[0];
+	_nzsl_matrix_4[1] = x[1] - y[1];
+	_nzsl_matrix_4[2] = x[2] - y[2];
+	metal::float3x3 r_2 = _nzsl_matrix_4;
+	metal::float3x3 r_3 = x * y;
 	x += y;
 	x -= y;
 	x *= y;

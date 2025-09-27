@@ -41,7 +41,6 @@
 namespace nzsl
 {
 	constexpr std::string_view s_mslNamespace = "metal::";
-	constexpr std::string_view s_mslExternalStructName = "_nzslExternals";
 
 	constexpr auto s_mslBuiltinMapping = frozen::make_unordered_map<Ast::BuiltinEntry, std::string_view>({
 		{ Ast::BuiltinEntry::BaseInstance,            { "base_instance" } },
@@ -66,6 +65,11 @@ namespace nzsl
 		{
 		}
 
+		void Visit(Ast::DeclareExternalStatement& node) override
+		{
+			externalStatements.push_back(node);
+		}
+
 		void Visit(Ast::DeclareFunctionStatement& node) override
 		{
 			if (node.funcIndex)
@@ -74,6 +78,7 @@ namespace nzsl
 			// Speed up by not visiting function statements, we only need to extract function data
 		}
 
+		std::vector<std::reference_wrapper<Ast::DeclareExternalStatement>> externalStatements;
 		MslWriter& m_writer;
 	};
 
@@ -224,7 +229,6 @@ namespace nzsl
 			const Ast::StructDescription* desc;
 		};
 
-		std::optional<std::size_t> currentExternalBlockIndex;
 		std::size_t currentModuleIndex;
 		std::stringstream stream;
 		std::unordered_map<std::size_t, Identifier> aliases;
@@ -233,6 +237,7 @@ namespace nzsl
 		std::unordered_map<std::size_t, Identifier> modules;
 		std::unordered_map<std::size_t, StructData> structs;
 		std::unordered_map<std::size_t, Identifier> variables;
+		std::vector<std::reference_wrapper<Ast::DeclareExternalStatement>> externalStatements;
 		std::vector<std::string> moduleNames;
 		const Ast::Module* currentModule;
 		bool enforceNonDefaultTypes = false;
@@ -241,7 +246,6 @@ namespace nzsl
 		unsigned int indentLevel = 0;
 		std::uint16_t externalBuffersCount = 0;
 		std::uint16_t externalTexturesCount = 0;
-		bool hasExternalStructDeclared = false;
 	};
 
 	std::string MslWriter::Generate(Ast::Module& module, const BackendParameters& parameters)
@@ -314,6 +318,7 @@ namespace nzsl
 
 			module.rootNode->Visit(previsitor);
 		}
+		m_currentState->externalStatements = std::move(previsitor.externalStatements);
 
 		// Register imported modules
 		m_currentState->currentModuleIndex = 0;
@@ -1104,7 +1109,7 @@ namespace nzsl
 	void MslWriter::RegisterVariable(std::size_t varIndex, std::string varName)
 	{
 		State::Identifier identifier;
-		identifier.externalBlockIndex = m_currentState->currentExternalBlockIndex;
+		identifier.externalBlockIndex = 0;
 		identifier.moduleIndex = m_currentState->currentModuleIndex;
 		identifier.name = std::move(varName);
 
@@ -1216,15 +1221,45 @@ namespace nzsl
 
 	void MslWriter::Visit(Ast::BinaryExpression& node)
 	{
+		switch (node.op)
+		{
+			case Ast::BinaryType::Modulo:
+			{
+				const Ast::ExpressionType& leftType = EnsureExpressionType(*node.left);
+
+				Ast::PrimitiveType primitiveType;
+
+				if (IsPrimitiveType(leftType))
+					primitiveType = std::get<Ast::PrimitiveType>(leftType);
+				else if (IsVectorType(leftType))
+					primitiveType = std::get<Ast::VectorType>(leftType).type;
+				else
+					throw std::runtime_error("unexpected type");
+
+				if (primitiveType == Ast::PrimitiveType::Float32 || primitiveType == Ast::PrimitiveType::Float64)
+				{
+					Append(s_mslNamespace, "fmod(");
+					Visit(node.left, true);
+					Append(", ");
+					Visit(node.right, true);
+					Append(')');
+					return;
+				}
+				break;
+			}
+
+			default: break;
+		}
+
 		Visit(node.left, true);
 
 		switch (node.op)
 		{
 			case Ast::BinaryType::Add:        Append(" + "); break;
 			case Ast::BinaryType::Subtract:   Append(" - "); break;
-			case Ast::BinaryType::Modulo:     Append(" % "); break;
 			case Ast::BinaryType::Multiply:   Append(" * "); break;
 			case Ast::BinaryType::Divide:     Append(" / "); break;
+			case Ast::BinaryType::Modulo:     Append(" % "); break;
 
 			case Ast::BinaryType::CompEq:     Append(" == "); break;
 			case Ast::BinaryType::CompGe:     Append(" >= "); break;
@@ -1583,23 +1618,10 @@ namespace nzsl
 		Append("continue;");
 	}
 
-	void MslWriter::Visit(Ast::DeclareAliasStatement& node)
+	void MslWriter::Visit(Ast::DeclareAliasStatement& /*node*/)
 	{
-		if (node.aliasIndex)
-			RegisterAlias(*node.aliasIndex, node.name);
-
-		Append("alias ", node.name, " = ");
-		assert(node.expression);
-		node.expression->Visit(*this);
-
-		// Special case, if that alias points to a module, use it instead to try to keep source code readable
-		if (node.expression->GetType() == Ast::NodeType::IdentifierValueExpression && static_cast<Ast::IdentifierValueExpression&>(*node.expression).identifierType == Ast::IdentifierType::Module)
-		{
-			auto& moduleExpr = Nz::SafeCast<Ast::IdentifierValueExpression&>(*node.expression);
-			m_currentState->moduleNames[moduleExpr.identifierIndex] = node.name;
-		}
-
-		AppendLine(";");
+		// all aliases should have been handled by sanitizer
+		throw std::runtime_error("unexpected alias declaration, is shader sanitized?");
 	}
 
 	void MslWriter::Visit(Ast::DeclareConstStatement& node)
@@ -1618,51 +1640,9 @@ namespace nzsl
 		AppendLine(";");
 	}
 
-	void MslWriter::Visit(Ast::DeclareExternalStatement& node)
+	void MslWriter::Visit(Ast::DeclareExternalStatement& /*node*/)
 	{
-		AppendLine("struct ", s_mslExternalStructName);
-		EnterScope();
-		{
-			bool first = true;
-			for (const auto& externalVar : node.externalVars)
-			{
-				const Ast::ExpressionType& exprType = externalVar.type.GetResultingValue();
-
-				if (!first)
-					AppendLine();
-				first = false;
-
-				if (IsUniformType(exprType))
-					Append("constant ", externalVar.type, "& ");
-				else if (IsStorageType(exprType))
-					Append("device ", externalVar.type, "* ");
-				else
-					Append(externalVar.type, ' ');
-				Append(externalVar.name, ' ');
-				if (IsUniformType(exprType) || IsStorageType(exprType))
-				{
-					Append("[[buffer(", m_currentState->externalBuffersCount, ")]]");
-					m_currentState->externalBuffersCount++;
-				}
-				else if (IsSamplerType(exprType) || IsTextureType(exprType))
-				{
-					Append("[[texture(", m_currentState->externalTexturesCount, ")]]");
-					m_currentState->externalTexturesCount++;
-				}
-				Append(';');
-				if (IsSamplerType(exprType))
-				{
-					AppendLine();
-					Append(s_mslNamespace, "sampler ", externalVar.name, "Sampler [[sampler(", (externalVar.bindingSet.GetResultingValue() + 1) * externalVar.bindingIndex.GetResultingValue(), ")]];");
-				}
-
-				if (externalVar.varIndex)
-					RegisterVariable(*externalVar.varIndex, externalVar.name);
-			}
-		}
-		LeaveScope(false);
-		AppendLine(';');
-		m_currentState->hasExternalStructDeclared = true;
+		/* nothing to do */
 	}
 
 	void MslWriter::Visit(Ast::DeclareFunctionStatement& node)
@@ -1680,31 +1660,73 @@ namespace nzsl
 			Append(node.returnType);
 		else
 			Append("void");
-		Append(" ", node.name, "(");
-		std::size_t i = 0;
-		for (; i < node.parameters.size(); ++i)
+		AppendLine(" ", node.name, "(");
+		m_currentState->indentLevel++;
 		{
-			const auto& parameter = node.parameters[i];
-
-			if (i != 0)
-				Append(',');
-
-			Append(parameter.type, ' ', parameter.name);
-			if (i == 0 && node.entryStage.HasValue())
+			std::size_t i = 0;
+			for (; i < node.parameters.size(); ++i)
 			{
-				if (node.entryStage.GetResultingValue() == ShaderStageType::Fragment || node.entryStage.GetResultingValue() == ShaderStageType::Vertex)
-					Append(" [[stage_in]]");
+				const auto& parameter = node.parameters[i];
+
+				if (i != 0)
+					AppendLine(',');
+
+				Append(parameter.type, ' ', parameter.name);
+				if (i == 0 && node.entryStage.HasValue())
+				{
+					if (node.entryStage.GetResultingValue() == ShaderStageType::Fragment || node.entryStage.GetResultingValue() == ShaderStageType::Vertex)
+						Append(" [[stage_in]]");
+				}
+
+				if (parameter.varIndex)
+					RegisterVariable(*parameter.varIndex, parameter.name);
 			}
 
-			if (parameter.varIndex)
-				RegisterVariable(*parameter.varIndex, parameter.name);
+			// External variables need to be declared as entry point parameters
+			if (node.entryStage.HasValue())
+			{
+				for (const auto& statement : m_currentState->externalStatements)
+				{
+					for (const auto& externalVar : statement.get().externalVars)
+					{
+						const Ast::ExpressionType& exprType = externalVar.type.GetResultingValue();
+
+						if (i != 0)
+							AppendLine(',');
+
+						if (IsUniformType(exprType))
+							Append("constant ", externalVar.type, "& ");
+						else if (IsStorageType(exprType))
+							Append("device ", externalVar.type, "* ");
+						else
+							Append(externalVar.type, ' ');
+						Append(externalVar.name, ' ');
+						if (IsUniformType(exprType) || IsStorageType(exprType))
+						{
+							Append("[[buffer(", m_currentState->externalBuffersCount, ")]]");
+							m_currentState->externalBuffersCount++;
+						}
+						else if (IsSamplerType(exprType) || IsTextureType(exprType))
+						{
+							Append("[[texture(", m_currentState->externalTexturesCount, ")]]");
+							m_currentState->externalTexturesCount++;
+						}
+						if (IsSamplerType(exprType))
+						{
+							AppendLine(',');
+							Append(s_mslNamespace, "sampler ", externalVar.name, "Sampler [[sampler(", (externalVar.bindingSet.GetResultingValue() + 1) * externalVar.bindingIndex.GetResultingValue(), ")]];");
+						}
+
+						if (externalVar.varIndex)
+							RegisterVariable(*externalVar.varIndex, externalVar.name);
+						++i;
+					}
+				}
+			}
 		}
-		if (m_currentState->hasExternalStructDeclared)
-		{
-			if (i != 0)
-				Append(", ");
-			AppendLine(s_mslExternalStructName, " externals)");
-		}
+		m_currentState->indentLevel--;
+		AppendLine();
+		AppendLine(')');
 		EnterScope();
 		{
 			AppendStatementList(node.statements);

@@ -66,6 +66,19 @@ void main()
 }
 )");
 
+		ExpectMSL(*shaderModule, R"(
+fragment
+Output main0(
+	Input input [[stage_in]],
+	constant Data& extData [[buffer(0)]]
+)
+{
+	Output output;
+	output.value = extData.value * input.value;
+	return output;
+}
+)");
+
 		ExpectNZSL(*shaderModule, R"(
 [entry(frag)]
 fn main(input: In) -> FragOut
@@ -183,6 +196,29 @@ void main()
 }
 )");
 
+			ExpectMSL(*shaderModule, R"(
+struct ForwardOutput
+{
+	metal::float4 color [[color(0)]];
+};
+
+struct DeferredOutput
+{
+	metal::float4 color [[color(0)]];
+	metal::float3 normal [[color(1)]];
+};
+
+fragment
+ForwardOutput main0(
+
+)
+{
+	ForwardOutput output;
+	output.color = metal::float4(0.0, 0.0, 1.0, 1.0);
+	return output;
+}
+)");
+
 			ExpectNZSL(*shaderModule, R"(
 struct ForwardOutput
 {
@@ -255,6 +291,30 @@ void main()
 	_nzslOutcolor = output_.color;
 	_nzslOutnormal = output_.normal;
 	return;
+}
+)");
+
+			ExpectMSL(*shaderModule, R"(
+struct ForwardOutput
+{
+	metal::float4 color [[color(0)]];
+};
+
+struct DeferredOutput
+{
+	metal::float4 color [[color(0)]];
+	metal::float3 normal [[color(1)]];
+};
+
+fragment
+DeferredOutput main0(
+
+)
+{
+	DeferredOutput output;
+	output.color = metal::float4(0.0, 0.0, 1.0, 1.0);
+	output.normal = metal::float3(0.0, 1.0, 0.0);
+	return output;
 }
 )");
 

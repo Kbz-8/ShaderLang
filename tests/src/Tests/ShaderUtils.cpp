@@ -430,7 +430,7 @@ void ExpectMSL(const nzsl::Ast::Module& shader, std::string_view expectedOutput,
 				#else
 					constexpr const bool isWindows = false;
 				#endif
-				if (isWindows)
+				if constexpr(isWindows)
 					ExecuteCommand(fmt::format("metal.exe -x metal {} '-Werror' '-Wno-unused-variable' -o NUL", filePath.string()), {}, {}, output);
 				else
 					ExecuteCommand(fmt::format("WINEDEBUG=-all metal.exe -x metal Z:{} '-Werror' '-Wno-unused-variable' -o /dev/null", filePath.string()), {}, {}, output);

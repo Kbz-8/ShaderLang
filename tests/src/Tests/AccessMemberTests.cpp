@@ -49,6 +49,16 @@ void main()
 }
 )");
 
+			ExpectMSL(*shaderModule, R"(
+vertex
+void main0(
+	constant outerStruct& ubo [[buffer(0)]]
+)
+{
+	float result = ubo.s.field.z;
+}
+)");
+
 			ExpectNZSL(*shaderModule, R"(
 [entry(vert)]
 fn main()
@@ -88,7 +98,9 @@ void main()
 
 			ExpectMSL(*shaderModule, R"(
 vertex
-void main0(_nzslExternals externals)
+void main0(
+	constant outerStruct& ubo [[buffer(0)]]
+)
 {
 	float result = ubo.s.field.z;
 }
